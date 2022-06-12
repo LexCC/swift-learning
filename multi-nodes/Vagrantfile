@@ -107,6 +107,10 @@ sudo sshpass -p vagrant sudo ssh -o StrictHostKeychecking=no vagrant@192.168.236
 $WORKER_SERVICE_START_COMMAND
 EOF
 done
+
+echo "export ST_AUTH=http://$NODE_ETH1_IP:8080/auth/v1.0" >> /home/vagrant/.bashrc
+echo "export ST_USER=admin:admin" >> /home/vagrant/.bashrc
+echo "export ST_KEY=admin" >> /home/vagrant/.bashrc
 PROXYPACKAGESCRIPT
 
 $commonscript = <<COMMONSCRIPT
