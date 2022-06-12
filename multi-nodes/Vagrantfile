@@ -1,0 +1,336 @@
+# -*- mode: ruby -*-
+
+# vi: set ft=ruby :
+
+Vagrant.require_version ">= 1.5.0"
+
+#####################
+#
+# Vagrant Box Parameters Begin
+#
+#####################
+$proxypackagescript = <<PROXYPACKAGESCRIPT
+set -v
+set -e
+echo root:vagrant | chpasswd
+
+cat << EOF >> /etc/hosts
+ 192.168.236.60 proxy1
+ 192.168.236.70 object1
+ 192.168.236.71 object2
+ 192.168.236.72 object3
+EOF
+sudo apt-get update
+sudo apt-get install swift swift-proxy python-swiftclient python-keystoneclient python-keystonemiddleware memcached sshpass -y
+sudo sed -i "s/-l 127.0.0.1/-l $NODE_ETH2_IP/" /etc/memcached.conf
+sudo systemctl enable memcached
+sudo systemctl start memcached
+sudo service memcached restart
+sudo mkdir -p /etc/swift/
+sudo cat << EOF >> /etc/swift/proxy-server.conf
+[DEFAULT]
+bind_ip = $NODE_ETH1_IP
+bind_port = 8080
+workers = 8
+user = vagrant
+
+[pipeline:main]
+pipeline = healthcheck cache tempauth proxy-server
+
+[app:proxy-server]
+use = egg:swift#proxy
+allow_account_management = true
+account_autocreate = true
+recheck_account_existence = 4000000
+
+[filter:cache]
+use = egg:swift#memcache
+memcache_servers = $NODE_ETH2_IP:11211
+
+[filter:catch_errors]
+use = egg:swift#catch_errors
+
+[filter:healthcheck]
+use = egg:swift#healthcheck
+
+[filter:tempauth]
+use = egg:swift#tempauth
+user_admin_admin = admin .admin .reseller_admin
+user_test_tester = testing .admin
+user_test2_tester2 = testing2 .admin
+user_test_tester3 = testing3
+EOF
+
+cat >/etc/swift/swift.conf <<EOF
+[swift-hash]
+swift_hash_path_prefix = `od -t x8 -N 8 -A n </dev/random`
+swift_hash_path_suffix = `od -t x8 -N 8 -A n </dev/random`
+EOF
+
+cd /etc/swift
+swift-ring-builder account.builder create 18 3 1
+swift-ring-builder container.builder create 18 3 1
+swift-ring-builder object.builder create 18 3 1
+
+swift-ring-builder account.builder add r1z1-192.168.252.70:6002/loop2 10
+swift-ring-builder container.builder add r1z1-192.168.252.70:6001/loop2 10
+swift-ring-builder object.builder add r1z1-192.168.252.70:6000/loop2 10
+
+swift-ring-builder account.builder add r1z2-192.168.252.71:6002/loop2 10
+swift-ring-builder container.builder add r1z2-192.168.252.71:6001/loop2 10
+swift-ring-builder object.builder add r1z2-192.168.252.71:6000/loop2 10
+
+swift-ring-builder account.builder add r1z3-192.168.252.72:6002/loop2 10
+swift-ring-builder container.builder add r1z3-192.168.252.72:6001/loop2 10
+swift-ring-builder object.builder add r1z3-192.168.252.72:6000/loop2 10
+
+swift-ring-builder account.builder rebalance
+swift-ring-builder container.builder rebalance
+swift-ring-builder object.builder rebalance
+
+chown -R vagrant:vagrant /etc/swift
+
+for i in 70 71 72
+do
+	sudo sshpass -p vagrant sudo scp -o StrictHostKeychecking=no /etc/swift/swift.conf vagrant@192.168.236.$i:/etc/swift/
+	sudo sshpass -p vagrant sudo scp -o StrictHostKeychecking=no /etc/swift/*.ring.gz vagrant@192.168.236.$i:/etc/swift/
+done
+
+sudo service swift-proxy start
+sudo service swift-proxy restart
+for i in 70 71 72
+do
+WORKER_SERVICE_START_COMMAND="sudo swift-init all restart"
+sudo sshpass -p vagrant sudo ssh -o StrictHostKeychecking=no vagrant@192.168.236.$i $WORKER_SERVICE_START_COMMAND || true
+WORKER_SERVICE_START_COMMAND="for svc in swift-object swift-object-replicator swift-object-updater swift-object-auditor swift-container swift-container-replicator swift-container-updater swift-container-auditor swift-account swift-account-replicator swift-account-reaper swift-account-auditor; do sudo service \\"\\${svc}\\" start; done"
+sudo sshpass -p vagrant sudo ssh -o StrictHostKeychecking=no vagrant@192.168.236.$i /bin/bash << EOF
+$WORKER_SERVICE_START_COMMAND
+EOF
+done
+PROXYPACKAGESCRIPT
+
+$commonscript = <<COMMONSCRIPT
+set -v
+set -e
+echo root:vagrant | chpasswd
+
+cat << EOF >> /etc/hosts
+ 192.168.236.60 proxy1
+ 192.168.236.70 object1
+ 192.168.236.71 object2
+ 192.168.236.72 object3
+EOF
+
+sudo apt-get install swift swift-account swift-container swift-object -y
+cat >/etc/rsyncd.conf <<EOF
+uid = vagrant
+gid = vagrant
+log file = /var/log/rsyncd.log
+pid file = /var/run/rsyncd.pid
+address = $NODE_ETH2_IP
+
+[account]
+max connections = 2
+path = /srv/node/
+read only = false
+lock file = /var/lock/account.lock
+
+[container]
+max connections = 2
+path = /srv/node/
+read only = false
+lock file = /var/lock/container.lock
+
+[object]
+max connections = 2
+path = /srv/node/
+read only = false
+lock file = /var/lock/object.lock
+EOF
+
+sudo sed -i "s/RSYNC_ENABLE=false/RSYNC_ENABLE=true/" /etc/default/rsync
+sudo systemctl enable rsync
+sudo systemctl start rsync
+sudo service rsync restart
+
+mkdir -p /var/swift/recon
+chown -R vagrant:vagrant /var/swift/recon
+
+cat >/etc/swift/account-server.conf <<EOF
+[DEFAULT]
+bind_ip = $NODE_ETH2_IP
+bind_port = 6002
+workers = 2
+user = vagrant
+
+[pipeline:main]
+pipeline = recon account-server
+
+[app:account-server]
+use = egg:swift#account
+
+[account-replicator]
+
+[account-auditor]
+
+[account-reaper]
+
+[filter:recon]
+use = egg:swift#recon
+recon_cache_path = /var/cache/swift
+account_recon = true 
+EOF
+
+cat >/etc/swift/container-server.conf <<EOF
+[DEFAULT]
+bind_ip = $NODE_ETH2_IP
+bind_port = 6001
+workers = 2
+user = vagrant
+
+[pipeline:main]
+pipeline = recon container-server
+
+[app:container-server]
+use = egg:swift#container
+
+[container-replicator]
+
+[container-updater]
+
+[container-auditor]
+
+[container-sync]
+
+[filter:recon]
+use = egg:swift#recon
+recon_cache_path = /var/cache/swift
+container_recon = true
+EOF
+
+cat >/etc/swift/object-server.conf <<EOF
+[DEFAULT]
+bind_ip = $NODE_ETH2_IP
+bind_port = 6000
+workers = 3
+user = vagrant
+
+[pipeline:main]
+pipeline = recon object-server
+
+[app:object-server]
+use = egg:swift#object
+
+[object-replicator]
+
+[object-updater]
+
+[object-auditor]
+
+[object-reconstructor]
+
+[filter:recon]
+use = egg:swift#recon
+recon_cache_path = /var/cache/swift
+object_recon = true
+EOF
+
+chown -R vagrant:vagrant /etc/swift
+mkdir -p /srv/node/loop2
+
+sudo mkdir -p /srv
+sudo truncate -s 1GB /srv/swift-disk
+sudo mkfs.xfs /srv/swift-disk
+echo "/srv/swift-disk /srv/node/loop2 xfs loop,noatime 0 0" >> /etc/fstab
+sudo mount -a
+chown -R vagrant:vagrant /srv/node/loop2
+
+mkdir -p /var/cache/swift
+chown -R vagrant:vagrant /var/cache/swift
+mkdir -p /var/run/swift
+chown -R vagrant:vagrant /var/run/swift
+COMMONSCRIPT
+
+boxes = [
+    {
+        :name => "object1",
+        :eth1 => "192.168.236.70",
+        :eth2 => "192.168.252.70",
+        :mem => "10240",
+        :cpu => "1",
+        :nodetype => "object",
+        :scripts => $commonscript
+    },
+    {
+        :name => "object2",
+        :eth1 => "192.168.236.71",
+        :eth2 => "192.168.252.71",
+        :mem => "10240",
+        :cpu => "1",
+        :nodetype => "object",
+	:scripts => $commonscript
+    },
+    {
+        :name => "object3",
+        :eth1 => "192.168.236.72",
+        :eth2 => "192.168.252.72",
+        :mem => "10240",
+        :cpu => "1",
+        :nodetype => "object",
+	:scripts => $commonscript
+    },
+    {
+        :name => "proxy1",
+        :eth1 => "192.168.236.60",
+        :eth2 => "192.168.252.60",
+        :mem => "10240",
+        :cpu => "1",
+        :nodetype => "proxy",
+        :scripts => $proxypackagescript
+    }
+]
+
+#####################
+#
+# Virtual Machine Definition Begin
+#
+#####################
+
+Vagrant.configure(2) do |config|
+
+  config.vm.box = "bento/ubuntu-18.04"
+
+  config.vm.provider "vmware_fusion" do |v, override|
+    override.vm.box = "centos-6.5-x86_64"
+    override.vm.box_url = "http://public.thornelabs.net/centos-6.5-x86_64.vmware.box"
+  end
+
+  # Turn off shared folders
+  config.vm.synced_folder ".", "/vagrant", id: "vagrant-root", disabled: true
+
+  boxes.each do |opts|
+    config.vm.define opts[:name] do |config|
+      config.vm.hostname = opts[:name]
+      config.vm.provision :shell, env: {"NODE_ETH1_IP" => opts[:eth1], "NODE_ETH2_IP" => opts[:eth2]}, inline: opts[:scripts]
+      
+      config.vm.network :private_network, ip: opts[:eth1]
+      config.vm.network :private_network, ip: opts[:eth2]
+
+      config.vm.provider "vmware_fusion" do |v|
+        v.vmx["memsize"] = opts[:mem]
+        v.vmx["numvcpus"] = opts[:cpu]
+      end
+
+      config.vm.provider "virtualbox" do |v|
+        v.customize ["modifyvm", :id, "--memory", opts[:mem]]
+        v.customize ["modifyvm", :id, "--cpus", opts[:cpu]]
+      end
+    end
+  end
+end
+
+#####################
+#
+# Virtual Machine Definition End
+#
+#####################
