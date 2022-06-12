@@ -1,0 +1,115 @@
+
+# Vagrant multi-machine sample setup
+
+Vagrant.configure("2") do |config|
+  config.ssh.username = "vagrant"
+  config.ssh.password = "vagrant"
+  config.vm.boot_timeout=3000
+  config.vm.define :alpha do |alpha|
+    alpha.vm.box = "bento/ubuntu-18.04"
+    alpha.vm.network "private_network", ip: "10.10.30.2"
+    alpha.vm.hostname = "master"
+  end
+
+   config.vm.provider "virtualbox" do |vb|
+  #   # Display the VirtualBox GUI when booting the machine
+  #   vb.gui = true
+  #
+  #   # Customize the amount of memory on the VM:
+     vb.memory = "51200"
+     vb.cpus = 20
+   #  vb.customize ["modifyvm", :id, "--uart1", "0x3F8", "4"]
+  #   vb.customize ["modifyvm", :id, "--uartmode1", "file", File::NULL]
+   end
+  config.vm.provision "shell", privileged: false, inline: <<-SHELL
+	sudo apt update -y
+        sudo apt install -y build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev wget libsqlite3-dev
+        wget https://www.python.org/ftp/python/3.8.0/Python-3.8.0.tgz
+	tar -xf Python-3.8.0.tgz
+	cd Python-3.8.0
+	./configure --enable-shared --enable-loadable-sqlite-extensions
+	make
+	sudo make altinstall
+	sudo ldconfig /usr/local/lib 
+	sudo apt install -y python3-pip
+	python3.8 -m pip install pip
+	sudo -H pip3.8 install --upgrade pip
+	echo "if [ -d "$HOME/.local/bin" ] ; then
+		PATH="$HOME/.local/bin:$PATH"
+		fi" >> $HOME/.bashrc
+	source ~/.bashrc
+ 	sudo apt-get update -y
+	sudo apt-get install -y curl gcc memcached rsync sqlite3 xfsprogs \
+                     git-core libffi-dev python-setuptools \
+                     liberasurecode-dev libssl-dev
+	sudo apt-get install -y python-coverage python-dev python-nose \
+                     python-xattr python-eventlet \
+                     python-greenlet python-pastedeploy \
+                     python-netifaces python-pip python-dnspython \
+                     python-mock
+	cd $HOME
+	sudo mkdir -p /srv
+	sudo truncate -s 1GB /srv/swift-disk
+	sudo mkfs.xfs /srv/swift-disk
+	echo "/srv/swift-disk /mnt/sdb1 xfs loop,noatime 0 0" >> /etc/fstab
+	sudo mkdir /mnt/sdb1
+	sudo mount -a
+	sudo mkdir /mnt/sdb1/1 /mnt/sdb1/2 /mnt/sdb1/3 /mnt/sdb1/4
+	sudo chown ${USER}:${USER} /mnt/sdb1/*
+	for x in {1..4}; do sudo ln -s /mnt/sdb1/$x /srv/$x; done
+	sudo mkdir -p /srv/1/node/sdb1 /srv/1/node/sdb5 \
+              /srv/2/node/sdb2 /srv/2/node/sdb6 \
+              /srv/3/node/sdb3 /srv/3/node/sdb7 \
+              /srv/4/node/sdb4 /srv/4/node/sdb8
+	sudo mkdir -p /var/run/swift
+	sudo mkdir -p /var/cache/swift /var/cache/swift2 \
+              /var/cache/swift3 /var/cache/swift4
+	sudo chown -R ${USER}:${USER} /var/run/swift
+	sudo chown -R ${USER}:${USER} /var/cache/swift*
+	for x in {1..4}; do sudo chown -R ${USER}:${USER} /srv/$x/; done
+	mkdir -p /var/cache/swift /var/cache/swift2 /var/cache/swift3 /var/cache/swift4
+	chown vagrant:vagrant /var/cache/swift*
+	mkdir -p /var/run/swift
+	chown vagrant:vagrant> /var/run/swift
+	sudo mkdir -p /srv
+	sudo truncate -s 1GB /srv/swift-tmp
+	sudo mkfs.xfs /srv/swift-tmp
+	sudo mount -o loop,noatime /srv/swift-tmp /tmp
+	sudo chmod -R 1777 /tmp
+	echo "/srv/swift-tmp /tmp xfs rw,noatime,attr2,inode64,noquota 0 0" >> /etc/fstab
+	sudo mkdir -p /mnt/tmp
+	sudo mount -o loop,noatime /srv/swift-tmp /mnt/tmp
+	sudo chown ${USER}:${USER} /mnt/tmp
+	echo "/srv/swift-tmp /mnt/tmp xfs rw,noatime,attr2,inode64,noquota 0 0" >> /etc/fstab
+	cd $HOME; git clone https://github.com/openstack/python-swiftclient.git
+	cd $HOME/python-swiftclient; sudo pip3.8 install -r requirements.txt; cd -
+	cd $HOME/python-swiftclient; sudo PBR_VERSION=1.2.3 python3.8 setup.py develop; cd -
+	cd $HOME; git clone https://github.com/openstack/swift.git
+	cd $HOME/swift; sudo pip3.8 install -r requirements.txt; cd -
+	cd $HOME/swift; sudo pip3.8 install --no-binary cryptography -r requirements.txt; sudo PBR_VERSION=1.2.3 python3.8 setup.py develop; cd -
+	cd $HOME/swift; sudo pip3.8 install -r test-requirements.txt; cd -
+	sudo cp $HOME/swift/doc/saio/rsyncd.conf /etc/
+	sudo sed -i "s/<your-user-name>/${USER}/" /etc/rsyncd.conf
+	sudo sed -i "s/RSYNC_ENABLE=false/RSYNC_ENABLE=true/" /etc/default/rsync
+	sudo systemctl enable rsync
+	sudo systemctl start rsync
+	rsync rsync://pub@localhost/
+	sudo systemctl enable memcached
+	sudo systemctl start memcached
+	sudo rm -rf /etc/swift
+	cd $HOME/swift/doc; sudo cp -r saio/swift /etc/swift; cd -
+	sudo chown -R ${USER}:${USER} /etc/swift
+	find /etc/swift/ -name \*.conf | xargs sudo sed -i "s/<your-user-name>/${USER}/"
+	mkdir -p $HOME/bin
+	cd $HOME/swift/doc; cp saio/bin/* $HOME/bin; cd -
+	chmod +x $HOME/bin/*
+	sudo sed -i "/find \/var\/log\/swift/d" $HOME/bin/resetswift
+	cp $HOME/swift/test/sample.conf /etc/swift/test.conf
+	echo "export SWIFT_TEST_CONFIG_FILE=/etc/swift/test.conf" >> $HOME/.bashrc
+	echo "export PATH=${PATH}:$HOME/bin" >> $HOME/.bashrc
+	echo "export SAIO_BLOCK_DEVICE=/srv/swift-disk" >> $HOME/.bashrc
+	export TMPDIR=/mnt/tmp
+	echo "export TMPDIR=/mnt/tmp" >> $HOME/.bashrc
+	. $HOME/.bashrc
+  SHELL
+end
