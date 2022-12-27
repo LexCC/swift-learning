@@ -111,5 +111,7 @@ Vagrant.configure("2") do |config|
 	export TMPDIR=/mnt/tmp
 	echo "export TMPDIR=/mnt/tmp" >> $HOME/.bashrc
 	. $HOME/.bashrc
+	remakerings
+	startmain
   SHELL
 end
