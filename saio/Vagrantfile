@@ -4,15 +4,24 @@
 Vagrant.configure("2") do |config|
   config.ssh.username = "vagrant"
   config.ssh.password = "vagrant"
+<<<<<<< HEAD
   config.vm.boot_timeout=3000
   config.vm.define :alpha do |alpha|
     alpha.vm.box = "bento/ubuntu-18.04"
     alpha.vm.network "private_network", ip: "10.10.30.2"
+=======
+  config.ssh.insert_key = false
+  config.vm.boot_timeout=3000
+  config.vm.define :alpha do |alpha|
+    config.vm.box = "mpasternak/focal64-arm"
+    #alpha.vm.network "private_network", ip: "10.10.30.2"
+>>>>>>> fb16fcc (add ring mechanism)
     alpha.vm.hostname = "master"
   end
 
    config.vm.provider "virtualbox" do |vb|
   #   # Display the VirtualBox GUI when booting the machine
+<<<<<<< HEAD
   #   vb.gui = true
   #
   #   # Customize the amount of memory on the VM:
@@ -20,6 +29,15 @@ Vagrant.configure("2") do |config|
      vb.cpus = 20
    #  vb.customize ["modifyvm", :id, "--uart1", "0x3F8", "4"]
   #   vb.customize ["modifyvm", :id, "--uartmode1", "file", File::NULL]
+=======
+     vb.gui = true
+  #
+  #   # Customize the amount of memory on the VM:
+     vb.memory = "4096"
+     vb.cpus = 2
+#     vb.customize ["modifyvm", :id, "--uart1", "0x3F8", "4"]
+#     vb.customize ["modifyvm", :id, "--uartmode1", "file", File::NULL]
+>>>>>>> fb16fcc (add ring mechanism)
    end
   config.vm.provision "shell", privileged: false, inline: <<-SHELL
 	sudo apt update -y
@@ -111,7 +129,10 @@ Vagrant.configure("2") do |config|
 	export TMPDIR=/mnt/tmp
 	echo "export TMPDIR=/mnt/tmp" >> $HOME/.bashrc
 	. $HOME/.bashrc
+<<<<<<< HEAD
 	/home/vagrant/bin/remakerings
 	/home/vagrant/bin/startmain
+=======
+>>>>>>> fb16fcc (add ring mechanism)
   SHELL
 end
