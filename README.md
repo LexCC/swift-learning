@@ -114,7 +114,7 @@ Zone N                                    |
    + Leverage memcached caching token, account and container data.
  + Account server: Provide tenant service, isolate by metadata.
  + Container server: Similar to folder, multiple files be stored in it.
- + Object server: Similar to files, object data would be stored in the nodes' file system.
+ + Object (File+Metadata) server: Similar to files, object data would be stored in the nodes' file system.
  + Consistency server: Consist of
    + Replicators:
      + Replicate objects and make a system in a consistent state
@@ -131,6 +131,64 @@ Zone N                                    |
      + Delete problematic account, container or objects and replicate from other server
      + Recover dbs or files which have bit rot problem
  + SQLite: Store account, container data.
+
+ > ***User Manual***
++ Every Object has a URL: *http://example.com/v1/account/container/object*
+  + account:
+    + Each account has its own URL
+    + Swift is multi-tenant
+  + container:
+    + Namespaces used to group objects within an account
+    + Containers are unlimited
+  + object:
+    + Each object is represented as a URL
+    + Users name the object
+    + object names may contain /, so ***pseudo-nested directories are possible***
++ Swift use the first 4 bytes of hash to find the placement of ring
+  + ETag: md5(object content)
+  + Hash: md5(/account/container/object)
+  + Partition hash calculation
+    + Ex: Hash=3098f203544d22b361d6ee1cfc7406e1, Partition power=16
+      + First 4 bytes: 30 98 f2 03
+      + Convert Hex to binary: 0011(3) 0000(0) 1001(9) 1000(8)
+      + Convert binary to decimal: 0011000010011000=12440
+      + Ans: Partition=12440
+  + Object Location Mapping:
+    + Object: cloudcat.jpg
+    + Partition: 12440
+    + Hash: 3098f203544d22b361d6ee1cfc7406e1
+    + Hash location on disk: /srv/node/d2/objects/12440/6e1(last characters of hash)/3098f203544d22b361d6ee1cfc7406e1(Full hash)/1478736472.70261.data(object timestamp)
++ HTTP methods for objects:
+  + GET: Downloads an object with its metadata.
+  + PUT: Creates new object with specified data content and metadata.
+  + COPY: Copies an object to another object.
+  + DELETE: Deletes an object.
+  + HEAD: Shows object metadata.
+  + POST: Creates or updates object metadata.
++ HTTP code for troubleshooting:
+  + 302 moved permanently: SSL is required and was not used
+  + 401 unauthorized:
+    + memcached not running on a node
+      + Check /var/log/memcached.log if problem persists.
+    + memcached connection timeout during system heavy load
+      + grep /var/log/all.log
+      + swift-init proxy restart
+  + 403 forbidden:
+    + User doesn't have permission to access the swift account
+  + 412 precondition failed:
+    + Missing path root in the request
+    + Request hanging
+    + Check the connection between client and Swift API server
+    + Check the setting of load balancer, and restart keepalived (option)
+    + grep "ERROR" in /var/log/swift/all.log
+  + 503 service unavailable:
+    + Find transaction ID from /var/log/swift/proxy_access.log
+    + grep the transaction ID through /var/log/swift/all.log
++ Check the health of 
+  + mounted disks: sdt health </mount/point>
+    + grep "Fail" or "sdt" in /var/log/ssnoded.log
+  + node: sudo ssdiag
++ Display all drivers and status
 
 > ***Mechnanism***
 + Recommend XFS file system by Swift official.
