@@ -150,9 +150,42 @@ Zone N                                    |
   + Partition hash calculation
     + Ex: Hash=3098f203544d22b361d6ee1cfc7406e1, Partition power=16
       + First 4 bytes: 30 98 f2 03
+      + Right Shift = 32 - Partition power(16) = 16 bits 
       + Convert Hex to binary: 0011(3) 0000(0) 1001(9) 1000(8)
       + Convert binary to decimal: 0011000010011000=12440
       + Ans: Partition=12440
+<details>
+  <summary>Logical to physical mapping caculation code</summary>
+
+### get_part()
+```python
+        #self._part_shift = 32 - self.part_power
+def get_part(self, account, container=None, obj=None): """
+        Get the partition for an account/container/object.
+
+        :param account: account name
+        :param container: container name
+        :param obj: object name
+        :returns: the partition number
+        """
+        key = hash_path(account, container, obj, raw_digest=True) if time() > self._rtime:
+            self._reload()
+        part = struct.unpack_from('>I', key)[0] >> self._part_shift
+        return part
+```
+
+### _get_part_nodes()
+- Get the devices of particular partition according get_part().
+```python
+        def _get_part_nodes(self, part):
+        part_nodes = []
+        seen_ids = set() for r2p2d in self._replica2part2dev_id: if part < len(r2p2d):
+                dev_id = r2p2d[part] if dev_id not in seen_ids:
+                    part_nodes.append(self.devs[dev_id])
+                    seen_ids.add(dev_id) return [dict(node, index=i) for i, node in enumerate(part_nodes)]
+```
+</details>
+
   + Object Location Mapping:
     + Object: cloudcat.jpg
     + Partition: 12440
@@ -285,6 +318,8 @@ Ring.part_power: Define amount of partition, 2^part_power
   + Step 4: If administrator delete partition on disk, dev_id set to none in _replica2part2dev accordingly.
   + Step 5: Gather partitions which are not satify dispersion principle.
   + Step 6: Gather partitions which are overweight.
+  + Step 7: Assign appropriate devices for assign_parts.
+  + Step 8: Save the results as ring file.
 <details>
   <summary>Step 1 Code</summary>
   
@@ -565,5 +600,59 @@ replica  | 1 | array([2, 4, 5,.....])
                     "Gathered %d/%d from dev %d [weight disperse]",
                     part, replica, dev['id'])
                 self._replica2part2dev[replica][part] = NONE_DEV
+```
+</details>
+
+
+<details>
+  <summary>Step 7 Code</summary>
+
+### _reassign_parts()
+- First of all, creates tier2devs list (tier -> [dev1, dev2...]), collects devices in each tiers.
+- Select the most avaliable tier, which is not reach max replicas.
+- Get the last device from the tier(tier2devs).
+- Choose the selected device as new device of reassign_partition, update _replica2part2dev corresponding dev_id.
+```python
+        assign_parts_list = list(assign_parts.items())
+self._reassign_parts(assign_parts_list, replica_plan)
+def _reassign_parts(self, reassign_parts, replica_plan):
+    .....
+    # Create tier -> [dev1, dev2...] list
+    for dev in available_devs:
+        for tier in dev['tiers']:
+            tier2devs[tier].append(dev)  # <-- starts out sorted!
+                tier2dev_sort_key[tier].append(dev['sort_key'])
+                tier2sort_key[tier] = dev['sort_key']
+    # Assign new device for reassign_parts
+    for part, replace_replicas in reassign_parts:
+        .......
+        for replica in replace_replicas:
+                tier = ()
+                depth = 1
+                while depth <= max_tier_depth:
+                    # Select the tier which are not reach max replicas
+                    candidates = [t for t in tier2children[tier] if
+                                  replicas_at_tier[t] <
+                                  replica_plan[t]['max']]
+
+                    if not candidates:
+                        raise Exception('no home for %s/%s %s' % (
+                            part, replica, {t: (
+                                replicas_at_tier[t],
+                                replica_plan[t]['max'],
+                            ) for t in tier2children[tier]}))
+                    # Select the most avaliable tier
+                    tier = max(candidates, key=lambda t:
+                               parts_available_in_tier[t])
+                    depth += 1
+                # Get the last device of the tier
+                dev = tier2devs[tier][-1]
+                dev['parts_wanted'] -= 1
+                dev['parts'] += 1
+                for tier in dev['tiers']:
+                    parts_available_in_tier[tier] -= 1
+                    replicas_at_tier[tier] += 1
+                # Selected device as the new device of replica2part
+                self._replica2part2dev[replica][part] = dev['id']
 ```
 </details>
