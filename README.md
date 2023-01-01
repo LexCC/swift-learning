@@ -733,5 +733,53 @@ def _reassign_parts(self, reassign_parts, replica_plan):
           + Evaluate invertible matrix by two ways:
             + Determinant of matrix not equal to 0.
             + Rank(matrix) = Dimension(matrix)
-    
-     
++ Behind API request:
+  + Authentication before any API request:
+    + Before do any API request, swift client would request proxy server `GET /auth/v1.0` with headers `{'X-Auth-User', 'X-Auth-Key'}`
+    ```python
+    # Python-swiftclient/swiftclient/client.py
+    def get_auth_1_0(url, user, key, snet, **kwargs):
+      ...
+      method = 'GET'
+      headers = {'X-Auth-User': user, 'X-Auth-Key': key}
+      ...
+    ```
+    + Return 401 unauthorized in middleware if account is suspicious, otherwise response `X-Auth-Token`
+    ```python
+        def handle_get_token(self, req):
+          ...
+          # Validate the request info
+          try:
+              pathsegs = split_path(req.path_info, 1, 3, True)
+          except ValueError:
+              self.logger.increment('errors')
+              return HTTPNotFound(request=req)
+          if pathsegs[0] == 'v1' and pathsegs[2] == 'auth':
+              account = pathsegs[1]
+              user = req.headers.get('x-storage-user')
+              if not user:
+                  user = req.headers.get('x-auth-user')
+                  if not user or ':' not in user:
+                      self.logger.increment('token_denied')
+                      auth = 'Swift realm="%s"' % account
+                      return HTTPUnauthorized(request=req,
+                                              headers={'Www-Authenticate': auth})
+                  account2, user = user.split(':', 1)
+                  if wsgi_to_str(account) != account2:
+                      self.logger.increment('token_denied')
+                      auth = 'Swift realm="%s"' % account
+                      return HTTPUnauthorized(request=req,
+                                              headers={'Www-Authenticate': auth})
+          ...
+          resp = Response(request=req, headers={
+              'x-auth-token': token, 'x-storage-token': token,
+              'x-auth-token-expires': str(int(expires - time()))})
+          url = self.users[account_user]['url'].replace('$HOST', resp.host_url)
+          if self.storage_url_scheme != 'default':
+              url = self.storage_url_scheme + ':' + url.split(':', 1)[1]
+          resp.headers['x-storage-url'] = url
+          return resp
+    ```
+    + Swift client request the desired API, with header `X-Auth-Token`
+      
+       
