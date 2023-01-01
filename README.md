@@ -154,6 +154,13 @@ Zone N                                    |
       + Convert Hex to binary: 0011(3) 0000(0) 1001(9) 1000(8)
       + Convert binary to decimal: 0011000010011000=12440
       + Ans: Partition=12440
++ If the object is over the threshold (default: 5G), data would be fragmentd.
++ Storage Policy: Erasure coding (EC)
+  + Proxy server streams an object and buffers up a segment (Portion of object's content) of data (size is configurable).
+  + Proxy server invokes PyECLib to code data into smaller fragments (Encode the segment and cut into multiple chunks), if clients wants to read data just get the fragments aka fragment archives (If one fragment is missing, just find the other copy), then decode and concatnate into the segment.
+    + Object reconstructor: Check all fragments and its peer, fix by copy the peer and replace to the broken fragments.
+  + Proxy server send out the fragments based on ring.
+  + Repeat until client is done sending data.
 <details>
   <summary>Logical to physical mapping caculation code</summary>
 
@@ -175,7 +182,7 @@ def get_part(self, account, container=None, obj=None): """
 ```
 
 ### _get_part_nodes()
-- Get the devices of particular partition according get_part().
+- Get all devices of particular partition according get_part().
 ```python
         def _get_part_nodes(self, part):
         part_nodes = []
@@ -656,3 +663,75 @@ def _reassign_parts(self, reassign_parts, replica_plan):
                 self._replica2part2dev[replica][part] = dev['id']
 ```
 </details>
+
+<br />
+
++ Behind store an object:
+  + When send a Put request, proxy server:
+    + Calculate hash value of (/account/container/object) to get partition ID.
+    + Get all devices IP and port according to partition ID.
+    + Try to connect all devices, denied the client request if half of devices couldn't connect.
+    + Try to create object through object server (Object would asynchronous invoke container service to update container database).
+    + If two out of three written succeed, proxy server would return success to client.
++ Behind get an object:
+  + When send a Get request, proxy server:
+    + Calculate hash value of (/account/container/object) to get partition ID.
+    + Get all devices IP and port according to partition ID.
+    + Sort all devices, connect to the device, if succeed, return data to client, otherwise try next device.
++ Behind the erasure codes:
+  + Simple idea: two points define a line, if the data can be represent by a formula, we can find any pieces alone the line. (If the data encoded to multiple chunks, the degree of equation growth to quadratic, cubic, polynomial equation)
+    + [![Linear equation](https://upload.wikimedia.org/wikipedia/commons/thumb/0/0e/Linear_Function_Graph.svg/220px-Linear_Function_Graph.svg.png)](https://zh-yue.wikipedia.org/wiki/%E7%B7%9A%E6%80%A7%E6%96%B9%E7%A8%8B%E5%BC%8F)
+  + Ex: Set 4 chunks as parameter to encode "Good", correction code: P1 and P2 (Allow amount of P<sub>1...n</sub> broken data)
+    + G = X1, o = X2, o = X3, d = X4, X1~X4 are real number:
+      + X1 = D1
+      + X2 = D2
+      + X3 = D3
+      + X4 = D4
+      + X1 + X2 + X3 + X4 = P1
+      + X1 + 2\*X2 + 4\*X3 + 8\*X4 = P2
+      + 1~7 can be represented as identity matrix:
+    $$\begin{bmatrix}
+    {1}&{0}&{0}&{0}\\
+    {0}&{1}&{0}&{0}\\
+    {0}&{0}&{1}&{0}\\
+    {0}&{0}&{0}&{1}\\
+    {1}&{1}&{1}&{1}\\
+    {1}&{2}&{4}&{8}\\
+    \end{bmatrix}$$
+    + Encode: We save the final result as encoded data ( *[D1 D2 D3 D4 P1 P2]* )
+    $$\begin{bmatrix}
+    {1}&{0}&{0}&{0}\\ 
+    {0}&{1}&{0}&{0}\\
+    {0}&{0}&{1}&{0}\\
+    {0}&{0}&{0}&{1}\\
+    {1}&{1}&{1}&{1}\\
+    {1}&{2}&{4}&{8}\\
+    \end{bmatrix} \times 
+    \begin{bmatrix}
+    {D1}\\ 
+    {D2}\\
+    {D3}\\
+    {D4}\\
+    \end{bmatrix} =
+    \begin{bmatrix}
+    {D1}\\ 
+    {D2}\\
+    {D3}\\
+    {D4}\\
+    {P1}\\
+    {P2}\\
+    \end{bmatrix}$$
+     + Decode: Assume the "d" (D4) of "Good" is broken,
+       + Select 4 rows (Since amount D<sub>1..n</sub>, n=4) from top to bottom of the matrix, and skip the broken row:
+          + $$\begin{bmatrix}{1}&{0}&{0}&{0}\\{0}&{1}&{0}&{0}\\{0}&{0}&{1}&{0}\\{}&{}&{}&{}\\{1}&{1}&{1}&{1}\\\end{bmatrix}$$
+        + Solve the equation:
+          + $$\begin{bmatrix}{1}&{0}&{0}&{0}\\{0}&{1}&{0}&{0}\\{0}&{0}&{1}&{0}\\{}&{}&{}&{}\\{1}&{1}&{1}&{1}\\\end{bmatrix} \times \begin{bmatrix}{D1}\\{D2}\\{D3}\\{D4}\\\end{bmatrix} = \begin{bmatrix}{D1}\\{D2}\\{D3}\\{}\\{P1}\\\end{bmatrix}$$
+        + A*A<sup>-1</sup> = E (Identity matrix), multiple A<sup>-1</sup> in both side:
+          + $$\begin{bmatrix}{1}&{0}&{0}&{0}\\{0}&{1}&{0}&{0}\\{0}&{0}&{1}&{0}\\{}&{}&{}&{}\\{1}&{1}&{1}&{1}\\\end{bmatrix}^{-1} \times \begin{bmatrix}{1}&{0}&{0}&{0}\\{0}&{1}&{0}&{0}\\{0}&{0}&{1}&{0}\\{}&{}&{}&{}\\{1}&{1}&{1}&{1}\\\end{bmatrix} \times \begin{bmatrix}{D1}\\{D2}\\{D3}\\{D4}\\\end{bmatrix} = \begin{bmatrix}{1}&{0}&{0}&{0}\\{0}&{1}&{0}&{0}\\{0}&{0}&{1}&{0}\\{}&{}&{}&{}\\{1}&{1}&{1}&{1}\\\end{bmatrix}^{-1} \times \begin{bmatrix}{D1}\\{D2}\\{D3}\\{}\\{P1}\\\end{bmatrix}$$
+          + $$ \begin{bmatrix}{D1}\\{D2}\\{D3}\\{D4}\\\end{bmatrix} = \begin{bmatrix}{1}&{0}&{0}&{0}\\{0}&{1}&{0}&{0}\\{0}&{0}&{1}&{0}\\{}&{}&{}&{}\\{1}&{1}&{1}&{1}\\\end{bmatrix}^{-1} \times \begin{bmatrix}{D1}\\{D2}\\{D3}\\{}\\{P1}\\\end{bmatrix}$$
+        + Solve above equation to fix D4, but check whether the matrix is invertible before solving.
+          + Evaluate invertible matrix by two ways:
+            + Determinant of matrix not equal to 0.
+            + Rank(matrix) = Dimension(matrix)
+    
+     
