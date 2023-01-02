@@ -734,6 +734,330 @@ def _reassign_parts(self, reassign_parts, replica_plan):
             + Determinant of matrix not equal to 0.
             + Rank(matrix) = Dimension(matrix)
 + Behind API request:
+  + HTTP Buffer:
+    + Proxy server implement `bufferedhttp.py` to buffer the client's request for every entrypoints.
+    ```python
+    # swift/common/bufferedhttp.py
+    ...
+    httplib._MAXHEADERS = constraints.MAX_HEADER_COUNT * 1.6
+    green_httplib._MAXHEADERS = constraints.MAX_HEADER_COUNT * 1.6
+    ...
+    ```
+    + Ex: `swift/proxy/controller/obj.py`
+    ```python
+    ...
+    # NOTE: swift_conn
+    # You'll see swift_conn passed around a few places in this file. This is the
+    # source bufferedhttp connection of whatever it is attached to.
+    ...
+    ```
+  + TCP connection for HTTP request: 
+    + Principle: Multiple accounts/containers/objects can't use the same TCP connection (Since the URL is different, Ex: a/b/c, a/b/d).
+    + `swift upload container object`: Using the same connection from authentication to sending data, client sends FIN to server once done with transporting data. 
+      ```
+      09:43:29.400306 lo    In  IP (tos 0x0, ttl 64, id 51586, offset 0, flags [DF], proto TCP (6), length 60)
+        127.0.0.1.50154 > 127.0.0.1.8080: Flags [S], cksum 0xfe30 (incorrect -> 0x4cb9), seq 1262896167, win 65495, options [mss 65495,sackOK,TS val 3516972735 ecr 0,nop,wscale 7], length 0
+      09:43:29.400353 lo    In  IP (tos 0x0, ttl 64, id 0, offset 0, flags [DF], proto TCP (6), length 60)
+          127.0.0.1.8080 > 127.0.0.1.50154: Flags [S.], cksum 0xfe30 (incorrect -> 0xa1b3), seq 1922934786, ack 1262896168, win 65483, options [mss 65495,sackOK,TS val 3516972735 ecr 3516972735,nop,wscale 7], length 0
+      09:43:29.400390 lo    In  IP (tos 0x0, ttl 64, id 51587, offset 0, flags [DF], proto TCP (6), length 52)
+          127.0.0.1.50154 > 127.0.0.1.8080: Flags [.], cksum 0xfe28 (incorrect -> 0xc86f), ack 1, win 512, options [nop,nop,TS val 3516972735 ecr 3516972735], length 0
+      09:43:29.400502 lo    In  IP (tos 0x0, ttl 64, id 51588, offset 0, flags [DF], proto TCP (6), length 193)
+          127.0.0.1.50154 > 127.0.0.1.8080: Flags [P.], cksum 0xfeb5 (incorrect -> 0xfa19), seq 1:142, ack 1, win 512, options [nop,nop,TS val 3516972735 ecr 3516972735], length 141: HTTP, length: 141
+        GET /auth/v1.0 HTTP/1.1
+        Host: 127.0.0.1:8080
+        User-Agent: curl/7.81.0
+        Accept: */*
+        X-Storage-User: test:tester
+        X-Storage-Pass: testing
+
+      09:43:29.400509 lo    In  IP (tos 0x0, ttl 64, id 26464, offset 0, flags [DF], proto TCP (6), length 52)
+          127.0.0.1.8080 > 127.0.0.1.50154: Flags [.], cksum 0xfe28 (incorrect -> 0xc7e3), ack 142, win 511, options [nop,nop,TS val 3516972735 ecr 3516972735], length 0
+      09:43:29.404817 lo    In  IP (tos 0x0, ttl 64, id 26465, offset 0, flags [DF], proto TCP (6), length 468)
+          127.0.0.1.8080 > 127.0.0.1.50154: Flags [P.], cksum 0xffc8 (incorrect -> 0xafbd), seq 1:417, ack 142, win 512, options [nop,nop,TS val 3516972740 ecr 3516972735], length 416: HTTP, length: 416
+        HTTP/1.1 200 OK
+        Content-Type: text/html; charset=UTF-8
+        X-Auth-Token: AUTH_tk6ccb8979f39843b5b18d0bf4f3f23803
+        X-Storage-Token: AUTH_tk6ccb8979f39843b5b18d0bf4f3f23803
+        X-Auth-Token-Expires: 84782
+        X-Storage-Url: http://127.0.0.1:8080/v1/AUTH_test
+        Content-Length: 0
+        X-Trans-Id: tx6e1ce3fc574f4a4c97342-0063b2a741
+        X-Openstack-Request-Id: tx6e1ce3fc574f4a4c97342-0063b2a741
+        Date: Mon, 02 Jan 2023 09:43:29 GMT
+
+      09:43:29.404838 lo    In  IP (tos 0x0, ttl 64, id 51589, offset 0, flags [DF], proto TCP (6), length 52)
+          127.0.0.1.50154 > 127.0.0.1.8080: Flags [.], cksum 0xfe28 (incorrect -> 0xc63b), ack 417, win 509, options [nop,nop,TS val 3516972740 ecr 3516972740], length 0
+      09:43:29.405127 lo    In  IP (tos 0x0, ttl 64, id 51590, offset 0, flags [DF], proto TCP (6), length 52)
+          127.0.0.1.50154 > 127.0.0.1.8080: Flags [F.], cksum 0xfe28 (incorrect -> 0xc637), seq 142, ack 417, win 512, options [nop,nop,TS val 3516972740 ecr 3516972740], length 0
+      09:43:29.405275 lo    In  IP (tos 0x0, ttl 64, id 26466, offset 0, flags [DF], proto TCP (6), length 52)
+          127.0.0.1.8080 > 127.0.0.1.50154: Flags [F.], cksum 0xfe28 (incorrect -> 0xc636), seq 417, ack 143, win 512, options [nop,nop,TS val 3516972740 ecr 3516972740], length 0
+      09:43:29.405283 lo    In  IP (tos 0x0, ttl 64, id 51591, offset 0, flags [DF], proto TCP (6), length 52)
+          127.0.0.1.50154 > 127.0.0.1.8080: Flags [.], cksum 0xfe28 (incorrect -> 0xc636), ack 418, win 512, options [nop,nop,TS val 3516972740 ecr 3516972740], length 0
+      ```
+    + `swift upload container object1 object2`: Using different TCP connection to upload the objects
+    ```
+    09:58:19.921273 lo    In  IP (tos 0x0, ttl 64, id 30618, offset 0, flags [DF], proto TCP (6), length 60)
+    127.0.0.1.34706 > 127.0.0.1.8080: Flags [S], cksum 0xfe30 (incorrect -> 0x2a38), seq 402276262, win 65495, options [mss 65495,sackOK,TS val 3517863256 ecr 0,nop,wscale 7], length 0
+    09:58:19.921283 lo    In  IP (tos 0x0, ttl 64, id 0, offset 0, flags [DF], proto TCP (6), length 60)
+        127.0.0.1.8080 > 127.0.0.1.34706: Flags [S.], cksum 0xfe30 (incorrect -> 0x2aa8), seq 462732527, ack 402276263, win 65483, options [mss 65495,sackOK,TS val 3517863256 ecr 3517863256,nop,wscale 7], length 0
+    09:58:19.921290 lo    In  IP (tos 0x0, ttl 64, id 30619, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.34706 > 127.0.0.1.8080: Flags [.], cksum 0xfe28 (incorrect -> 0x5164), ack 1, win 512, options [nop,nop,TS val 3517863256 ecr 3517863256], length 0
+    09:58:19.921312 lo    In  IP (tos 0x0, ttl 64, id 30620, offset 0, flags [DF], proto TCP (6), length 213)
+        127.0.0.1.34706 > 127.0.0.1.8080: Flags [P.], cksum 0xfec9 (incorrect -> 0x4f54), seq 1:162, ack 1, win 512, options [nop,nop,TS val 3517863256 ecr 3517863256], length 161: HTTP, length: 161
+      GET /auth/v1.0 HTTP/1.1
+      Host: 127.0.0.1:8080
+      Accept-Encoding: identity
+      x-auth-user: test:tester
+      x-auth-key: testing
+      user-agent: python-swiftclient-1.2.3
+
+    09:58:19.921314 lo    In  IP (tos 0x0, ttl 64, id 28763, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.8080 > 127.0.0.1.34706: Flags [.], cksum 0xfe28 (incorrect -> 0x50c4), ack 162, win 511, options [nop,nop,TS val 3517863256 ecr 3517863256], length 0
+    09:58:19.922423 lo    In  IP (tos 0x0, ttl 64, id 28764, offset 0, flags [DF], proto TCP (6), length 468)
+        127.0.0.1.8080 > 127.0.0.1.34706: Flags [P.], cksum 0xffc8 (incorrect -> 0x4df1), seq 1:417, ack 162, win 512, options [nop,nop,TS val 3517863257 ecr 3517863256], length 416: HTTP, length: 416
+      HTTP/1.1 200 OK
+      Content-Type: text/html; charset=UTF-8
+      X-Auth-Token: AUTH_tk6ccb8979f39843b5b18d0bf4f3f23803
+      X-Storage-Token: AUTH_tk6ccb8979f39843b5b18d0bf4f3f23803
+      X-Auth-Token-Expires: 83891
+      X-Storage-Url: http://127.0.0.1:8080/v1/AUTH_test
+      Content-Length: 0
+      X-Trans-Id: tx1ee8453cb0bf4254905a3-0063b2aabb
+      X-Openstack-Request-Id: tx1ee8453cb0bf4254905a3-0063b2aabb
+      Date: Mon, 02 Jan 2023 09:58:19 GMT
+
+    09:58:19.922430 lo    In  IP (tos 0x0, ttl 64, id 30621, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.34706 > 127.0.0.1.8080: Flags [.], cksum 0xfe28 (incorrect -> 0x4f24), ack 417, win 509, options [nop,nop,TS val 3517863257 ecr 3517863257], length 0
+    09:58:19.922743 lo    In  IP (tos 0x0, ttl 64, id 30622, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.34706 > 127.0.0.1.8080: Flags [F.], cksum 0xfe28 (incorrect -> 0x4f1f), seq 162, ack 417, win 512, options [nop,nop,TS val 3517863258 ecr 3517863257], length 0
+    09:58:19.922812 lo    In  IP (tos 0x0, ttl 64, id 28765, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.8080 > 127.0.0.1.34706: Flags [F.], cksum 0xfe28 (incorrect -> 0x4f1d), seq 417, ack 163, win 512, options [nop,nop,TS val 3517863258 ecr 3517863258], length 0
+    09:58:19.922815 lo    In  IP (tos 0x0, ttl 64, id 30623, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.34706 > 127.0.0.1.8080: Flags [.], cksum 0xfe28 (incorrect -> 0x4f1d), ack 418, win 512, options [nop,nop,TS val 3517863258 ecr 3517863258], length 0
+    09:58:19.923241 lo    In  IP (tos 0x0, ttl 64, id 50214, offset 0, flags [DF], proto TCP (6), length 60)
+        127.0.0.1.34716 > 127.0.0.1.8080: Flags [S], cksum 0xfe30 (incorrect -> 0x83aa), seq 2191096712, win 65495, options [mss 65495,sackOK,TS val 3517863258 ecr 0,nop,wscale 7], length 0
+    09:58:19.923244 lo    In  IP (tos 0x0, ttl 64, id 0, offset 0, flags [DF], proto TCP (6), length 60)
+        127.0.0.1.8080 > 127.0.0.1.34716: Flags [S.], cksum 0xfe30 (incorrect -> 0x91a4), seq 2132233184, ack 2191096713, win 65483, options [mss 65495,sackOK,TS val 3517863258 ecr 3517863258,nop,wscale 7], length 0
+    09:58:19.923247 lo    In  IP (tos 0x0, ttl 64, id 50215, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.34716 > 127.0.0.1.8080: Flags [.], cksum 0xfe28 (incorrect -> 0xb860), ack 1, win 512, options [nop,nop,TS val 3517863258 ecr 3517863258], length 0
+    09:58:19.923259 lo    In  IP (tos 0x0, ttl 64, id 50216, offset 0, flags [DF], proto TCP (6), length 254)
+        127.0.0.1.34716 > 127.0.0.1.8080: Flags [P.], cksum 0xfef2 (incorrect -> 0x49ea), seq 1:203, ack 1, win 512, options [nop,nop,TS val 3517863258 ecr 3517863258], length 202: HTTP, length: 202
+      PUT /v1/AUTH_test/containera HTTP/1.1
+      Host: 127.0.0.1:8080
+      Accept-Encoding: identity
+      x-auth-token: AUTH_tk6ccb8979f39843b5b18d0bf4f3f23803
+      content-length: 0
+      user-agent: python-swiftclient-1.2.3
+
+    09:58:19.923261 lo    In  IP (tos 0x0, ttl 64, id 51583, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.8080 > 127.0.0.1.34716: Flags [.], cksum 0xfe28 (incorrect -> 0xb797), ack 203, win 511, options [nop,nop,TS val 3517863258 ecr 3517863258], length 0
+    09:58:19.986302 lo    In  IP (tos 0x0, ttl 64, id 51584, offset 0, flags [DF], proto TCP (6), length 358)
+        127.0.0.1.8080 > 127.0.0.1.34716: Flags [P.], cksum 0xff5a (incorrect -> 0x5c98), seq 1:307, ack 203, win 512, options [nop,nop,TS val 3517863321 ecr 3517863258], length 306: HTTP, length: 306
+      HTTP/1.1 202 Accepted
+      Content-Type: text/html; charset=UTF-8
+      Content-Length: 76
+      X-Trans-Id: tx904e167fde594414bc426-0063b2aabb
+      X-Openstack-Request-Id: tx904e167fde594414bc426-0063b2aabb
+      Date: Mon, 02 Jan 2023 09:58:19 GMT
+
+      <html><h1>Accepted</h1><p>The request is accepted for processing.</p></html> [|http]
+    09:58:19.986310 lo    In  IP (tos 0x0, ttl 64, id 50217, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.34716 > 127.0.0.1.8080: Flags [.], cksum 0xfe28 (incorrect -> 0xb5e8), ack 307, win 510, options [nop,nop,TS val 3517863321 ecr 3517863321], length 0
+    09:58:19.988184 lo    In  IP (tos 0x0, ttl 64, id 57224, offset 0, flags [DF], proto TCP (6), length 60)
+        127.0.0.1.34724 > 127.0.0.1.8080: Flags [S], cksum 0xfe30 (incorrect -> 0xdc55), seq 1239112530, win 65495, options [mss 65495,sackOK,TS val 3517863323 ecr 0,nop,wscale 7], length 0
+    09:58:19.988188 lo    In  IP (tos 0x0, ttl 64, id 0, offset 0, flags [DF], proto TCP (6), length 60)
+        127.0.0.1.8080 > 127.0.0.1.34724: Flags [S.], cksum 0xfe30 (incorrect -> 0xbcea), seq 2959689650, ack 1239112531, win 65483, options [mss 65495,sackOK,TS val 3517863323 ecr 3517863323,nop,wscale 7], length 0
+    09:58:19.988190 lo    In  IP (tos 0x0, ttl 64, id 57225, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.34724 > 127.0.0.1.8080: Flags [.], cksum 0xfe28 (incorrect -> 0xe3a6), ack 1, win 512, options [nop,nop,TS val 3517863323 ecr 3517863323], length 0
+    09:58:19.988321 lo    In  IP (tos 0x0, ttl 64, id 15637, offset 0, flags [DF], proto TCP (6), length 60)
+        127.0.0.1.34730 > 127.0.0.1.8080: Flags [S], cksum 0xfe30 (incorrect -> 0x7945), seq 923586859, win 65495, options [mss 65495,sackOK,TS val 3517863323 ecr 0,nop,wscale 7], length 0
+    09:58:19.988324 lo    In  IP (tos 0x0, ttl 64, id 0, offset 0, flags [DF], proto TCP (6), length 60)
+        127.0.0.1.8080 > 127.0.0.1.34730: Flags [S.], cksum 0xfe30 (incorrect -> 0x8fc7), seq 941263380, ack 923586860, win 65483, options [mss 65495,sackOK,TS val 3517863323 ecr 3517863323,nop,wscale 7], length 0
+    09:58:19.988327 lo    In  IP (tos 0x0, ttl 64, id 15638, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.34730 > 127.0.0.1.8080: Flags [.], cksum 0xfe28 (incorrect -> 0xb683), ack 1, win 512, options [nop,nop,TS val 3517863323 ecr 3517863323], length 0
+    09:58:19.988439 lo    In  IP (tos 0x0, ttl 64, id 15639, offset 0, flags [DF], proto TCP (6), length 213)
+        127.0.0.1.34730 > 127.0.0.1.8080: Flags [P.], cksum 0xfec9 (incorrect -> 0xb473), seq 1:162, ack 1, win 512, options [nop,nop,TS val 3517863323 ecr 3517863323], length 161: HTTP, length: 161
+      GET /auth/v1.0 HTTP/1.1
+      Host: 127.0.0.1:8080
+      Accept-Encoding: identity
+      x-auth-user: test:tester
+      x-auth-key: testing
+      user-agent: python-swiftclient-1.2.3
+
+    09:58:19.988443 lo    In  IP (tos 0x0, ttl 64, id 54084, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.8080 > 127.0.0.1.34730: Flags [.], cksum 0xfe28 (incorrect -> 0xb5e3), ack 162, win 511, options [nop,nop,TS val 3517863323 ecr 3517863323], length 0
+    09:58:19.988458 lo    In  IP (tos 0x0, ttl 64, id 57226, offset 0, flags [DF], proto TCP (6), length 213)
+        127.0.0.1.34724 > 127.0.0.1.8080: Flags [P.], cksum 0xfec9 (incorrect -> 0xe196), seq 1:162, ack 1, win 512, options [nop,nop,TS val 3517863323 ecr 3517863323], length 161: HTTP, length: 161
+      GET /auth/v1.0 HTTP/1.1
+      Host: 127.0.0.1:8080
+      Accept-Encoding: identity
+      x-auth-user: test:tester
+      x-auth-key: testing
+      user-agent: python-swiftclient-1.2.3
+
+    09:58:19.988462 lo    In  IP (tos 0x0, ttl 64, id 28143, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.8080 > 127.0.0.1.34724: Flags [.], cksum 0xfe28 (incorrect -> 0xe306), ack 162, win 511, options [nop,nop,TS val 3517863323 ecr 3517863323], length 0
+    09:58:19.989381 lo    In  IP (tos 0x0, ttl 64, id 54085, offset 0, flags [DF], proto TCP (6), length 468)
+        127.0.0.1.8080 > 127.0.0.1.34730: Flags [P.], cksum 0xffc8 (incorrect -> 0xe7e1), seq 1:417, ack 162, win 512, options [nop,nop,TS val 3517863324 ecr 3517863323], length 416: HTTP, length: 416
+      HTTP/1.1 200 OK
+      Content-Type: text/html; charset=UTF-8
+      X-Auth-Token: AUTH_tk6ccb8979f39843b5b18d0bf4f3f23803
+      X-Storage-Token: AUTH_tk6ccb8979f39843b5b18d0bf4f3f23803
+      X-Auth-Token-Expires: 83891
+      X-Storage-Url: http://127.0.0.1:8080/v1/AUTH_test
+      Content-Length: 0
+      X-Trans-Id: txb2cf7b58ae4641ec8bfde-0063b2aabb
+      X-Openstack-Request-Id: txb2cf7b58ae4641ec8bfde-0063b2aabb
+      Date: Mon, 02 Jan 2023 09:58:19 GMT
+
+    09:58:19.989388 lo    In  IP (tos 0x0, ttl 64, id 15640, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.34730 > 127.0.0.1.8080: Flags [.], cksum 0xfe28 (incorrect -> 0xb443), ack 417, win 509, options [nop,nop,TS val 3517863324 ecr 3517863324], length 0
+    09:58:19.989618 lo    In  IP (tos 0x0, ttl 64, id 15641, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.34730 > 127.0.0.1.8080: Flags [F.], cksum 0xfe28 (incorrect -> 0xb43f), seq 162, ack 417, win 512, options [nop,nop,TS val 3517863324 ecr 3517863324], length 0
+    09:58:19.989784 lo    In  IP (tos 0x0, ttl 64, id 28144, offset 0, flags [DF], proto TCP (6), length 468)
+        127.0.0.1.8080 > 127.0.0.1.34724: Flags [P.], cksum 0xffc8 (incorrect -> 0x30c3), seq 1:417, ack 162, win 512, options [nop,nop,TS val 3517863325 ecr 3517863323], length 416: HTTP, length: 416
+      HTTP/1.1 200 OK
+      Content-Type: text/html; charset=UTF-8
+      X-Auth-Token: AUTH_tk6ccb8979f39843b5b18d0bf4f3f23803
+      X-Storage-Token: AUTH_tk6ccb8979f39843b5b18d0bf4f3f23803
+      X-Auth-Token-Expires: 83891
+      X-Storage-Url: http://127.0.0.1:8080/v1/AUTH_test
+      Content-Length: 0
+      X-Trans-Id: tx4de11395969b4a9994474-0063b2aabb
+      X-Openstack-Request-Id: tx4de11395969b4a9994474-0063b2aabb
+      Date: Mon, 02 Jan 2023 09:58:19 GMT
+
+    09:58:19.989793 lo    In  IP (tos 0x0, ttl 64, id 57227, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.34724 > 127.0.0.1.8080: Flags [.], cksum 0xfe28 (incorrect -> 0xe164), ack 417, win 509, options [nop,nop,TS val 3517863325 ecr 3517863325], length 0
+    09:58:19.989889 lo    In  IP (tos 0x0, ttl 64, id 54086, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.8080 > 127.0.0.1.34730: Flags [F.], cksum 0xfe28 (incorrect -> 0xb43d), seq 417, ack 163, win 512, options [nop,nop,TS val 3517863325 ecr 3517863324], length 0
+    09:58:19.989892 lo    In  IP (tos 0x0, ttl 64, id 15642, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.34730 > 127.0.0.1.8080: Flags [.], cksum 0xfe28 (incorrect -> 0xb43c), ack 418, win 512, options [nop,nop,TS val 3517863325 ecr 3517863325], length 0
+    09:58:19.990325 lo    In  IP (tos 0x0, ttl 64, id 57228, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.34724 > 127.0.0.1.8080: Flags [F.], cksum 0xfe28 (incorrect -> 0xe160), seq 162, ack 417, win 512, options [nop,nop,TS val 3517863325 ecr 3517863325], length 0
+    09:58:19.990377 lo    In  IP (tos 0x0, ttl 64, id 28145, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.8080 > 127.0.0.1.34724: Flags [F.], cksum 0xfe28 (incorrect -> 0xe15f), seq 417, ack 163, win 512, options [nop,nop,TS val 3517863325 ecr 3517863325], length 0
+    09:58:19.990379 lo    In  IP (tos 0x0, ttl 64, id 57229, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.34724 > 127.0.0.1.8080: Flags [.], cksum 0xfe28 (incorrect -> 0xe15f), ack 418, win 512, options [nop,nop,TS val 3517863325 ecr 3517863325], length 0
+    09:58:19.990848 lo    In  IP (tos 0x0, ttl 64, id 11154, offset 0, flags [DF], proto TCP (6), length 60)
+        127.0.0.1.34742 > 127.0.0.1.8080: Flags [S], cksum 0xfe30 (incorrect -> 0x4998), seq 2251731359, win 65495, options [mss 65495,sackOK,TS val 3517863326 ecr 0,nop,wscale 7], length 0
+    09:58:19.990851 lo    In  IP (tos 0x0, ttl 64, id 0, offset 0, flags [DF], proto TCP (6), length 60)
+        127.0.0.1.8080 > 127.0.0.1.34742: Flags [S.], cksum 0xfe30 (incorrect -> 0x533a), seq 3858622733, ack 2251731360, win 65483, options [mss 65495,sackOK,TS val 3517863326 ecr 3517863326,nop,wscale 7], length 0
+    09:58:19.990852 lo    In  IP (tos 0x0, ttl 64, id 44315, offset 0, flags [DF], proto TCP (6), length 60)
+        127.0.0.1.34752 > 127.0.0.1.8080: Flags [S], cksum 0xfe30 (incorrect -> 0xb43e), seq 1562472452, win 65495, options [mss 65495,sackOK,TS val 3517863326 ecr 0,nop,wscale 7], length 0
+    09:58:19.990854 lo    In  IP (tos 0x0, ttl 64, id 11155, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.34742 > 127.0.0.1.8080: Flags [.], cksum 0xfe28 (incorrect -> 0x79f6), ack 1, win 512, options [nop,nop,TS val 3517863326 ecr 3517863326], length 0
+    09:58:19.990855 lo    In  IP (tos 0x0, ttl 64, id 0, offset 0, flags [DF], proto TCP (6), length 60)
+        127.0.0.1.8080 > 127.0.0.1.34752: Flags [S.], cksum 0xfe30 (incorrect -> 0x4fe7), seq 3559811286, ack 1562472453, win 65483, options [mss 65495,sackOK,TS val 3517863326 ecr 3517863326,nop,wscale 7], length 0
+    09:58:19.990857 lo    In  IP (tos 0x0, ttl 64, id 44316, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.34752 > 127.0.0.1.8080: Flags [.], cksum 0xfe28 (incorrect -> 0x76a3), ack 1, win 512, options [nop,nop,TS val 3517863326 ecr 3517863326], length 0
+    09:58:19.990870 lo    In  IP (tos 0x0, ttl 64, id 11156, offset 0, flags [DF], proto TCP (6), length 243)
+        127.0.0.1.34742 > 127.0.0.1.8080: Flags [P.], cksum 0xfee7 (incorrect -> 0x2944), seq 1:192, ack 1, win 512, options [nop,nop,TS val 3517863326 ecr 3517863326], length 191: HTTP, length: 191
+      HEAD /v1/AUTH_test/containera/q1.txt HTTP/1.1
+      Host: 127.0.0.1:8080
+      Accept-Encoding: identity
+      x-auth-token: AUTH_tk6ccb8979f39843b5b18d0bf4f3f23803
+      user-agent: python-swiftclient-1.2.3
+
+    09:58:19.990871 lo    In  IP (tos 0x0, ttl 64, id 28748, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.8080 > 127.0.0.1.34742: Flags [.], cksum 0xfe28 (incorrect -> 0x7938), ack 192, win 511, options [nop,nop,TS val 3517863326 ecr 3517863326], length 0
+    09:58:19.990892 lo    In  IP (tos 0x0, ttl 64, id 44317, offset 0, flags [DF], proto TCP (6), length 243)
+        127.0.0.1.34752 > 127.0.0.1.8080: Flags [P.], cksum 0xfee7 (incorrect -> 0x25f0), seq 1:192, ack 1, win 512, options [nop,nop,TS val 3517863326 ecr 3517863326], length 191: HTTP, length: 191
+      HEAD /v1/AUTH_test/containera/q2.txt HTTP/1.1
+      Host: 127.0.0.1:8080
+      Accept-Encoding: identity
+      x-auth-token: AUTH_tk6ccb8979f39843b5b18d0bf4f3f23803
+      user-agent: python-swiftclient-1.2.3
+
+    09:58:19.990894 lo    In  IP (tos 0x0, ttl 64, id 48252, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.8080 > 127.0.0.1.34752: Flags [.], cksum 0xfe28 (incorrect -> 0x75e5), ack 192, win 511, options [nop,nop,TS val 3517863326 ecr 3517863326], length 0
+    09:58:20.010298 lo    In  IP (tos 0x0, ttl 64, id 48253, offset 0, flags [DF], proto TCP (6), length 282)
+        127.0.0.1.8080 > 127.0.0.1.34752: Flags [P.], cksum 0xff0e (incorrect -> 0x0ed5), seq 1:231, ack 192, win 512, options [nop,nop,TS val 3517863345 ecr 3517863326], length 230: HTTP, length: 230
+      HTTP/1.1 404 Not Found
+      Content-Type: text/html; charset=UTF-8
+      Content-Length: 0
+      X-Trans-Id: tx06345d66a74d4803ba2ef-0063b2aabb
+      X-Openstack-Request-Id: tx06345d66a74d4803ba2ef-0063b2aabb
+      Date: Mon, 02 Jan 2023 09:58:20 GMT
+
+    09:58:20.010306 lo    In  IP (tos 0x0, ttl 64, id 44318, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.34752 > 127.0.0.1.8080: Flags [.], cksum 0xfe28 (incorrect -> 0x74d9), ack 231, win 511, options [nop,nop,TS val 3517863345 ecr 3517863345], length 0
+    09:58:20.010901 lo    In  IP (tos 0x0, ttl 64, id 28749, offset 0, flags [DF], proto TCP (6), length 282)
+        127.0.0.1.8080 > 127.0.0.1.34742: Flags [P.], cksum 0xff0e (incorrect -> 0x7615), seq 1:231, ack 192, win 512, options [nop,nop,TS val 3517863346 ecr 3517863326], length 230: HTTP, length: 230
+      HTTP/1.1 404 Not Found
+      Content-Type: text/html; charset=UTF-8
+      Content-Length: 0
+      X-Trans-Id: tx1e44d70df0f4421f96087-0063b2aabb
+      X-Openstack-Request-Id: tx1e44d70df0f4421f96087-0063b2aabb
+      Date: Mon, 02 Jan 2023 09:58:20 GMT
+
+    09:58:20.010908 lo    In  IP (tos 0x0, ttl 64, id 11157, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.34742 > 127.0.0.1.8080: Flags [.], cksum 0xfe28 (incorrect -> 0x782a), ack 231, win 511, options [nop,nop,TS val 3517863346 ecr 3517863346], length 0
+    09:58:20.011196 lo    In  IP (tos 0x0, ttl 64, id 44319, offset 0, flags [DF], proto TCP (6), length 301)
+        127.0.0.1.34752 > 127.0.0.1.8080: Flags [P.], cksum 0xff21 (incorrect -> 0x0c9b), seq 192:441, ack 231, win 512, options [nop,nop,TS val 3517863346 ecr 3517863345], length 249: HTTP, length: 249
+      PUT /v1/AUTH_test/containera/q2.txt HTTP/1.1
+      Host: 127.0.0.1:8080
+      Accept-Encoding: identity
+      x-object-meta-mtime: 1672653454.087197
+      x-auth-token: AUTH_tk6ccb8979f39843b5b18d0bf4f3f23803
+      content-length: 0
+      user-agent: python-swiftclient-1.2.3
+
+    09:58:20.011801 lo    In  IP (tos 0x0, ttl 64, id 11158, offset 0, flags [DF], proto TCP (6), length 301)
+        127.0.0.1.34742 > 127.0.0.1.8080: Flags [P.], cksum 0xff21 (incorrect -> 0x15f0), seq 192:441, ack 231, win 512, options [nop,nop,TS val 3517863347 ecr 3517863346], length 249: HTTP, length: 249
+      PUT /v1/AUTH_test/containera/q1.txt HTTP/1.1
+      Host: 127.0.0.1:8080
+      Accept-Encoding: identity
+      x-object-meta-mtime: 1672653451.503279
+      x-auth-token: AUTH_tk6ccb8979f39843b5b18d0bf4f3f23803
+      content-length: 0
+      user-agent: python-swiftclient-1.2.3
+
+    09:58:20.054203 lo    In  IP (tos 0x0, ttl 64, id 28750, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.8080 > 127.0.0.1.34742: Flags [.], cksum 0xfe28 (incorrect -> 0x7704), ack 441, win 512, options [nop,nop,TS val 3517863389 ecr 3517863347], length 0
+    09:58:20.057638 lo    In  IP (tos 0x0, ttl 64, id 48254, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.8080 > 127.0.0.1.34752: Flags [.], cksum 0xfe28 (incorrect -> 0x73ae), ack 441, win 512, options [nop,nop,TS val 3517863393 ecr 3517863346], length 0
+    09:58:20.061757 lo    In  IP (tos 0x0, ttl 64, id 28751, offset 0, flags [DF], proto TCP (6), length 366)
+        127.0.0.1.8080 > 127.0.0.1.34742: Flags [P.], cksum 0xff62 (incorrect -> 0x135d), seq 231:545, ack 441, win 512, options [nop,nop,TS val 3517863397 ecr 3517863347], length 314: HTTP, length: 314
+      HTTP/1.1 201 Created
+      Content-Type: text/html; charset=UTF-8
+      Content-Length: 0
+      Etag: d41d8cd98f00b204e9800998ecf8427e
+      Last-Modified: Mon, 02 Jan 2023 09:58:21 GMT
+      X-Trans-Id: tx84a18ea292d74bf4981e2-0063b2aabc
+      X-Openstack-Request-Id: tx84a18ea292d74bf4981e2-0063b2aabc
+      Date: Mon, 02 Jan 2023 09:58:20 GMT
+
+    09:58:20.062306 lo    In  IP (tos 0x0, ttl 64, id 48255, offset 0, flags [DF], proto TCP (6), length 366)
+        127.0.0.1.8080 > 127.0.0.1.34752: Flags [P.], cksum 0xff62 (incorrect -> 0xf004), seq 231:545, ack 441, win 512, options [nop,nop,TS val 3517863397 ecr 3517863346], length 314: HTTP, length: 314
+      HTTP/1.1 201 Created
+      Content-Type: text/html; charset=UTF-8
+      Content-Length: 0
+      Etag: d41d8cd98f00b204e9800998ecf8427e
+      Last-Modified: Mon, 02 Jan 2023 09:58:21 GMT
+      X-Trans-Id: txc6493a9756f8457abde98-0063b2aabc
+      X-Openstack-Request-Id: txc6493a9756f8457abde98-0063b2aabc
+      Date: Mon, 02 Jan 2023 09:58:20 GMT
+
+    09:58:20.068267 lo    In  IP (tos 0x0, ttl 64, id 44320, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.34752 > 127.0.0.1.8080: Flags [F.], cksum 0xfe28 (incorrect -> 0x7236), seq 441, ack 545, win 512, options [nop,nop,TS val 3517863403 ecr 3517863397], length 0
+    09:58:20.068316 lo    In  IP (tos 0x0, ttl 64, id 50218, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.34716 > 127.0.0.1.8080: Flags [F.], cksum 0xfe28 (incorrect -> 0xb593), seq 203, ack 307, win 512, options [nop,nop,TS val 3517863403 ecr 3517863321], length 0
+    09:58:20.068331 lo    In  IP (tos 0x0, ttl 64, id 11159, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.34742 > 127.0.0.1.8080: Flags [F.], cksum 0xfe28 (incorrect -> 0x7589), seq 441, ack 545, win 512, options [nop,nop,TS val 3517863403 ecr 3517863397], length 0
+    09:58:20.068376 lo    In  IP (tos 0x0, ttl 64, id 48256, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.8080 > 127.0.0.1.34752: Flags [F.], cksum 0xfe28 (incorrect -> 0x722f), seq 545, ack 442, win 512, options [nop,nop,TS val 3517863403 ecr 3517863403], length 0
+    09:58:20.068379 lo    In  IP (tos 0x0, ttl 64, id 44321, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.34752 > 127.0.0.1.8080: Flags [.], cksum 0xfe28 (incorrect -> 0x722f), ack 546, win 512, options [nop,nop,TS val 3517863403 ecr 3517863403], length 0
+    09:58:20.068461 lo    In  IP (tos 0x0, ttl 64, id 28752, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.8080 > 127.0.0.1.34742: Flags [F.], cksum 0xfe28 (incorrect -> 0x7582), seq 545, ack 442, win 512, options [nop,nop,TS val 3517863403 ecr 3517863403], length 0
+    09:58:20.068466 lo    In  IP (tos 0x0, ttl 64, id 11160, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.34742 > 127.0.0.1.8080: Flags [.], cksum 0xfe28 (incorrect -> 0x7582), ack 546, win 512, options [nop,nop,TS val 3517863403 ecr 3517863403], length 0
+    09:58:20.068501 lo    In  IP (tos 0x0, ttl 64, id 51585, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.8080 > 127.0.0.1.34716: Flags [F.], cksum 0xfe28 (incorrect -> 0xb540), seq 307, ack 204, win 512, options [nop,nop,TS val 3517863403 ecr 3517863403], length 0
+    09:58:20.068503 lo    In  IP (tos 0x0, ttl 64, id 50219, offset 0, flags [DF], proto TCP (6), length 52)
+        127.0.0.1.34716 > 127.0.0.1.8080: Flags [.], cksum 0xfe28 (incorrect -> 0xb540), ack 308, win 512, options [nop,nop,TS val 3517863403 ecr 3517863403], length 0
+    ```
   + Authentication before any API request:
     + Before do any API request, swift client would request proxy server `GET /auth/v1.0` with headers `{'X-Auth-User', 'X-Auth-Key'}`
     ```python
