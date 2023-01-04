@@ -1058,6 +1058,187 @@ def _reassign_parts(self, reassign_parts, replica_plan):
     09:58:20.068503 lo    In  IP (tos 0x0, ttl 64, id 50219, offset 0, flags [DF], proto TCP (6), length 52)
         127.0.0.1.34716 > 127.0.0.1.8080: Flags [.], cksum 0xfe28 (incorrect -> 0xb540), ack 308, win 512, options [nop,nop,TS val 3517863403 ecr 3517863403], length 0
     ```
+  + Proxy server arrange proper components controller for request:
+    ```python
+        def handle_request(self, req):
+        """
+        Entry point for proxy server.
+        ...
+        """
+        ...
+            try:
+                controller, path_parts = self.get_controller(req)
+    ```
+    ```python
+        def get_controller(self, req):
+        """
+        Get the controller to handle a request.
+
+        :param req: the request
+        :returns: tuple of (controller class, path dictionary)
+
+        :raises ValueError: (thrown by split_path) if given invalid path
+        """
+        if req.path == '/info':
+            d = dict(version=None,
+                     expose_info=self.expose_info,
+                     disallowed_sections=self.disallowed_sections,
+                     admin_key=self.admin_key)
+            return InfoController, d
+
+        version, account, container, obj = split_path(
+            wsgi_to_str(req.path), 1, 4, True)
+        d = dict(version=version,
+                 account_name=account,
+                 container_name=container,
+                 object_name=obj)
+        if account and not valid_api_version(version):
+            raise APIVersionError('Invalid path')
+        if obj and container and account:
+            info = get_container_info(req.environ, self)
+            if is_server_error(info.get('status')):
+                raise HTTPServiceUnavailable(request=req)
+            policy_index = req.headers.get('X-Backend-Storage-Policy-Index',
+                                           info['storage_policy'])
+            policy = POLICIES.get_by_index(policy_index)
+            if not policy:
+                # This indicates that a new policy has been created,
+                # with rings, deployed, released (i.e. deprecated =
+                # False), used by a client to create a container via
+                # another proxy that was restarted after the policy
+                # was released, and is now cached - all before this
+                # worker was HUPed to stop accepting new
+                # connections.  There should never be an "unknown"
+                # index - but when there is - it's probably operator
+                # error and hopefully temporary.
+                raise HTTPServiceUnavailable('Unknown Storage Policy')
+            return self.obj_controller_router[policy], d
+        elif container and account:
+            return ContainerController, d
+        elif account and not container and not obj:
+            return AccountController, d
+        return None, d
+    ```
+  + Proxy server handle client adding objects (Policy: replication):
+    + Get all nodes by partition ID, and send object to nodes.
+    ```python
+    def PUT(self, req):
+        """HTTP PUT request handler."""
+        ...
+        partition, nodes = obj_ring.get_nodes(
+            self.account_name, self.container_name, self.object_name)
+
+        ...
+        # send object to storage nodes
+        resp = self._store_object(
+            req, data_source, nodes, partition, outgoing_headers)
+        return resp
+    ```
+    + Filter enough nodes by write affinity, run multiple threads to store object
+      ```python
+          def _store_object(self, req, data_source, nodes, partition,
+                      outgoing_headers):
+            ...
+
+            putters = self._get_put_connections(
+                req, nodes, partition, outgoing_headers, policy)
+            ...
+      ```
+      ```python
+          def _get_put_connections(self, req, nodes, partition, outgoing_headers,
+                             policy):
+          ...
+          node_iter = GreenthreadSafeIterator(
+              self.iter_nodes_local_first(obj_ring, partition, policy=policy))
+          pile = GreenPile(len(nodes))
+
+          for nheaders in outgoing_headers:
+              ...
+              pile.spawn(self._connect_put_node, node_iter, partition,
+                        req, nheaders, self.logger.thread_locals)
+
+          ...
+      ```
+      ```python
+          def iter_nodes_local_first(self, ring, partition, policy=None,
+                               local_handoffs_first=False):
+          ...
+          policy_options = self.app.get_policy_options(policy)
+          is_local = policy_options.write_affinity_is_local_fn
+          ...
+      ```
+  + Proxy server handle client getting objects (Policy: EC): Proxy server request multiple batches of bytes and send to client (Send out immediately once receive a batch), release CPU by sleep() to avoid starvation when every 5 chunks.
+    ```python
+      @ObjectControllerRouter.register(EC_POLICY)
+      class ECObjectController(BaseObjectController):
+          def _fragment_GET_request(
+                  self, req, node_iter, partition, policy,
+                  header_provider, logger_thread_locals):
+              ...
+              return (getter, getter.response_parts_iter(req))
+    ```
+    ```python
+          def _get_response_parts_iter(self, req):
+          try:
+              ...
+              parts_iter = [
+                  http_response_to_document_iters(
+                      self.source, read_chunk_size=self.app.object_chunk_size)]
+
+              def get_next_doc_part():
+                  while True:
+                      try:
+                          ...
+                              start_byte, end_byte, length, headers, part = next(
+                                  parts_iter[0])
+                          return (start_byte, end_byte, length, headers, part)
+                          ...
+                          parts_iter[0] = http_response_to_document_iters(
+                              new_source,
+                              read_chunk_size=self.app.object_chunk_size)
+
+              def iter_bytes_from_response_part(part_file, nbytes):
+                nchunks = 0
+                buf = b''
+                part_file = ByteCountEnforcer(part_file, nbytes)
+                while True:
+                    try:
+                        ...
+                            parts_iter[0] = http_response_to_document_iters(
+                                new_source,
+                                read_chunk_size=self.app.object_chunk_size)
+                        ...
+
+                        # This is for fairness; if the network is outpacing
+                        # the CPU, we'll always be able to read and write
+                        # data without encountering an EWOULDBLOCK, and so
+                        # eventlet will not switch greenthreads on its own.
+                        # We do it manually so that clients don't starve.
+                        ...
+                        if nchunks % 5 == 0:
+                            sleep()
+              part_iter = None
+              try:
+                  while True:
+                      try:
+                          start_byte, end_byte, length, headers, part = \
+                              get_next_doc_part()
+                    ...
+                      part_iter = iter_bytes_from_response_part(part, byte_count)
+                      yield {'start_byte': start_byte, 'end_byte': end_byte,
+                            'entity_length': length, 'headers': headers,
+                            'part_iter': part_iter}
+                      self.pop_range()
+              finally:
+                  if part_iter:
+                      part_iter.close()
+
+          ...
+          finally:
+              # Close-out the connection as best as possible.
+              if getattr(self.source, 'swift_conn', None):
+                  close_swift_conn(self.source)
+    ```
   + Authentication before any API request:
     + Before do any API request, swift client would request proxy server `GET /auth/v1.0` with headers `{'X-Auth-User', 'X-Auth-Key'}`
     ```python
@@ -1070,39 +1251,27 @@ def _reassign_parts(self, reassign_parts, replica_plan):
     ```
     + Return 401 unauthorized in middleware if account is suspicious, otherwise response `X-Auth-Token`
     ```python
-        def handle_get_token(self, req):
-          ...
-          # Validate the request info
-          try:
-              pathsegs = split_path(req.path_info, 1, 3, True)
-          except ValueError:
-              self.logger.increment('errors')
-              return HTTPNotFound(request=req)
-          if pathsegs[0] == 'v1' and pathsegs[2] == 'auth':
-              account = pathsegs[1]
-              user = req.headers.get('x-storage-user')
-              if not user:
-                  user = req.headers.get('x-auth-user')
-                  if not user or ':' not in user:
-                      self.logger.increment('token_denied')
-                      auth = 'Swift realm="%s"' % account
-                      return HTTPUnauthorized(request=req,
-                                              headers={'Www-Authenticate': auth})
-                  account2, user = user.split(':', 1)
-                  if wsgi_to_str(account) != account2:
-                      self.logger.increment('token_denied')
-                      auth = 'Swift realm="%s"' % account
-                      return HTTPUnauthorized(request=req,
-                                              headers={'Www-Authenticate': auth})
-          ...
-          resp = Response(request=req, headers={
-              'x-auth-token': token, 'x-storage-token': token,
-              'x-auth-token-expires': str(int(expires - time()))})
-          url = self.users[account_user]['url'].replace('$HOST', resp.host_url)
-          if self.storage_url_scheme != 'default':
-              url = self.storage_url_scheme + ':' + url.split(':', 1)[1]
-          resp.headers['x-storage-url'] = url
-          return resp
+        def get_controller(self, req):
+        """
+        Get the controller to handle a request.
+        ...
+        """
+        ...
+        if obj and container and account:
+            info = get_container_info(req.environ, self)
+            if is_server_error(info.get('status')):
+                raise HTTPServiceUnavailable(request=req)
+            policy_index = req.headers.get('X-Backend-Storage-Policy-Index',
+                                           info['storage_policy'])
+            policy = POLICIES.get_by_index(policy_index)
+            if not policy:
+                raise HTTPServiceUnavailable('Unknown Storage Policy')
+            return self.obj_controller_router[policy], d
+        elif container and account:
+            return ContainerController, d
+        elif account and not container and not obj:
+            return AccountController, d
+        return None, d
     ```
     + Swift client request the desired API, with header `X-Auth-Token`
       
