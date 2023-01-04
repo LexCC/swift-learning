@@ -1119,7 +1119,7 @@ def _reassign_parts(self, reassign_parts, replica_plan):
             return AccountController, d
         return None, d
     ```
-  + Proxy server handle client adding objects (Policy: replication):
+  + Proxy server handle client adding objects (Policy: replication): Retrieve the object from storage nodes (Support multiple fragments downloads), send the data to client after object retreive completion.
     + Get all nodes by partition ID, and send object to nodes.
     ```python
     def PUT(self, req):
@@ -1167,6 +1167,132 @@ def _reassign_parts(self, reassign_parts, replica_plan):
           is_local = policy_options.write_affinity_is_local_fn
           ...
       ```
+  + Proxy server handle client getting objects (Policy: Replication):
+  ```python
+      def GETorHEAD(self, req):
+        ...
+        partition = obj_ring.get_part(
+            self.account_name, self.container_name, self.object_name)
+        node_iter = self.app.iter_nodes(obj_ring, partition, self.logger,
+                                        policy=policy)
+
+        resp = self._get_or_head_response(req, node_iter, partition, policy)
+        ...
+  ```
+  ```python
+      def _get_or_head_response(self, req, node_iter, partition, policy):
+            ...
+            resp = self.GETorHEAD_base(
+                req, 'Object', node_iter, partition,
+                req.swift_entity_path, concurrency, policy)
+            return resp
+  ```
+  ```python
+      def GETorHEAD_base(self, req, server_type, node_iter, partition, path,
+                       concurrency=1, policy=None, client_chunk_size=None):
+        ...
+        backend_headers = self.generate_request_headers(
+            req, additional=req.headers)
+
+        handler = GetOrHeadHandler(self.app, req, self.server_type, node_iter,
+                                   partition, path, backend_headers,
+                                   concurrency, policy=policy,
+                                   client_chunk_size=client_chunk_size,
+                                   logger=self.logger)
+        res = handler.get_working_response(req)
+        ...
+  ```
+  ```python
+      def get_working_response(self, req):
+            ...
+            if source:
+                res = Response(request=req)
+                res.status = source.status
+                update_headers(res, source.getheaders())
+                if req.method == 'GET' and \
+                        source.status in (HTTP_OK, HTTP_PARTIAL_CONTENT):
+                    res.app_iter = self._make_app_iter(req, node, source)
+                    ...
+  ```
+  ```python
+      def _make_app_iter(self, req, node, source):
+            """
+            Returns an iterator over the contents of the source (via its read
+            func).  There is also quite a bit of cleanup to ensure garbage
+            collection works and the underlying socket of the source is closed.
+
+            :param req: incoming request object
+            :param source: The httplib.Response object this iterator should read
+                          from.
+            :param node: The node the source is reading from, for logging purposes.
+            """
+
+            ct = source.getheader('Content-Type')
+            if ct:
+                content_type, content_type_attrs = parse_content_type(ct)
+                is_multipart = content_type == 'multipart/byteranges'
+            else:
+                is_multipart = False
+            ...
+            return document_iters_to_http_response_body(
+                (add_content_type(pi) for pi in parts_iter),
+                boundary, is_multipart, self.logger)
+  ```
+  ```python
+      def response_parts_iter(self, req):
+        try:
+            self.source, self.node = next(self.source_and_node_iter)
+        except StopIteration:
+            return
+        it = None
+        if self.source:
+            it = self._get_response_parts_iter(req)
+        return it
+
+    def _get_response_parts_iter(self, req):
+        try:
+            ...
+            # This is safe; it sets up a generator but does not call next()
+            # on it, so no IO is performed.
+            parts_iter = [
+                http_response_to_document_iters(
+                    self.source, read_chunk_size=self.app.object_chunk_size)]
+            ...
+            def iter_bytes_from_response_part(part_file, nbytes):
+                nchunks = 0
+                buf = b''
+                part_file = ByteCountEnforcer(part_file, nbytes)
+                while True:
+                    ...
+                        if client_chunk_size is not None:
+                            while len(buf) >= client_chunk_size:
+                                client_chunk = buf[:client_chunk_size]
+                                buf = buf[client_chunk_size:]
+                                with WatchdogTimeout(self.app.watchdog,
+                                                     self.app.client_timeout,
+                                                     ChunkWriteTimeout):
+                                    self.bytes_used_from_backend += \
+                                        len(client_chunk)
+                                    yield client_chunk
+                    ...
+
+            part_iter = None
+            try:
+                while True:
+                    try:
+                        start_byte, end_byte, length, headers, part = \
+                            get_next_doc_part()
+                    ...
+                    byte_count = ((end_byte - start_byte + 1) - self.skip_bytes
+                                  if (end_byte is not None
+                                      and start_byte is not None)
+                                  else None)
+                    part_iter = iter_bytes_from_response_part(part, byte_count)
+                    yield {'start_byte': start_byte, 'end_byte': end_byte,
+                           'entity_length': length, 'headers': headers,
+                           'part_iter': part_iter}
+                    ...
+  ```
   + Proxy server handle client getting objects (Policy: EC): Proxy server request multiple batches of bytes and send to client (Send out immediately once receive a batch), release CPU by sleep() to avoid starvation when every 5 chunks.
     ```python
       @ObjectControllerRouter.register(EC_POLICY)
@@ -1239,6 +1365,108 @@ def _reassign_parts(self, reassign_parts, replica_plan):
               if getattr(self.source, 'swift_conn', None):
                   close_swift_conn(self.source)
     ```
+  + `max_clients` option for wsgi server
+  ```python
+    def run_server(conf, logger, sock, global_conf=None, ready_callback=None,
+               allow_modify_pipeline=True):
+    ...
+    max_clients = int(conf.get('max_clients', '1024'))
+    pool = RestrictedGreenPool(size=max_clients)
+    ...
+    server_kwargs = {
+        'custom_pool': pool,
+        'protocol': protocol_class,
+        'socket_timeout': float(conf.get('client_timeout') or 60),
+        # Disable capitalizing headers in Eventlet. This is necessary for
+        # the AWS SDK to work with s3api middleware (it needs an "ETag"
+        # header; "Etag" just won't do).
+        'capitalize_response_headers': False,
+    }
+    if ready_callback:
+        ready_callback()
+    try:
+        wsgi.server(sock, app, wsgi_logger, **server_kwargs)
+    except socket.error as err:
+        if err.errno != errno.EINVAL:
+            raise
+    pool.waitall()
+  ```
+  ```python
+  def server(sock, site,
+           log=None,
+           environ=None,
+           max_size=None,
+           max_http_version=DEFAULT_MAX_HTTP_VERSION,
+           protocol=HttpProtocol,
+           server_event=None,
+           minimum_chunk_size=None,
+           log_x_forwarded_for=True,
+           custom_pool=None,
+           keepalive=True,
+           log_output=True,
+           log_format=DEFAULT_LOG_FORMAT,
+           url_length_limit=MAX_REQUEST_LINE,
+           debug=True,
+           socket_timeout=None,
+           capitalize_response_headers=True):
+    """
+    ...
+    :param custom_pool: A custom GreenPool instance which is used to spawn client green threads.
+                If this is supplied, max_size is ignored.
+    """
+  ```
+  + `concurrent_gets` for proxy server to retreive object: If the options is enabled, proxy server would create threads as the same amount as replica_count, wait for the first node complete request if inflight is greater than concurrency.
+  ```python
+    @ObjectControllerRouter.register(REPL_POLICY)
+  class ReplicatedObjectController(BaseObjectController):
+      def _get_or_head_response(self, req, node_iter, partition, policy):
+          concurrency = self.app.get_object_ring(policy.idx).replica_count \
+              if self.app.get_policy_options(policy).concurrent_gets else 1
+          resp = self.GETorHEAD_base(
+              req, 'Object', node_iter, partition,
+              req.swift_entity_path, concurrency, policy)
+          return resp
+  ```
+  ```python
+      def GETorHEAD_base(self, req, server_type, node_iter, partition, path,
+                       concurrency=1, policy=None, client_chunk_size=None):
+        ...
+        res = handler.get_working_response(req)
+        ...
+  ```
+  ```python
+      def get_working_response(self, req):
+        source, node = self._get_source_and_node()
+        ...
+  ```
+  ```python
+   def _get_source_and_node(self):
+        ...
+        nodes = GreenthreadSafeIterator(self.node_iter)
+        ...
+        pile = GreenAsyncPile(self.concurrency)
+
+        for node in nodes:
+            pile.spawn(self._make_node_request, node, node_timeout,
+                       self.logger.thread_locals)
+            _timeout = self.app.get_policy_options(
+                self.policy).concurrency_timeout \
+                if pile.inflight < self.concurrency else None
+            if pile.waitfirst(_timeout):
+                break
+        else:
+            # ran out of nodes, see if any stragglers will finish
+            any(pile)
+        ...
+  ```
+  + `eventlet_debug` for wsgi server: eventlet.debug.hub_exceptions: Toggles whether the hub prints exceptions that are raised from its timers. This can be useful to see how greenthreads are terminating.
+  ```python
+  def run_server(conf, logger, sock, global_conf=None, ready_callback=None,
+               allow_modify_pipeline=True):
+    ...
+    eventlet_debug = config_true_value(conf.get('eventlet_debug', 'no'))
+    eventlet.debug.hub_exceptions(eventlet_debug)
+  ```
   + Authentication before any API request:
     + Before do any API request, swift client would request proxy server `GET /auth/v1.0` with headers `{'X-Auth-User', 'X-Auth-Key'}`
     ```python
